@@ -15,6 +15,7 @@ class Config:
     poll_interval_sec: float = 3.0
     rescan_interval_sec: float = 15.0
     progress_notifications: bool = True
+    auto_update: bool = True
 
     @classmethod
     def load(cls) -> "Config":

@@ -1,0 +1,5 @@
+__version__ = "1.0.0"
+__author__ = "Alexey (Dlzxn)"
+__email__ = "aleshamarichev09@gmail.com"
+__url__ = "https://github.com/Dlzxn/fluid_desktop"
+GITHUB_REPO = "Dlzxn/fluid_desktop"

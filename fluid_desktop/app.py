@@ -8,12 +8,14 @@ from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPain
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QApplication, QInputDialog, QLabel, QMainWindow, QMenu,
-                               QMessageBox, QSystemTrayIcon, QToolBar)
+                               QMessageBox, QProgressDialog, QSystemTrayIcon, QToolBar)
 
-from . import discovery
+from . import __author__, __email__, __url__, __version__, discovery, updater
 from .config import APP_NAME, CONFIG_DIR, Config
 from .discovery import Printer
 from .monitor import PrinterMonitor
+
+UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 WAIT_PAGE = """
 <html><body style="background:#1e1e1e;color:#ddd;font-family:Segoe UI,sans-serif;
@@ -79,6 +81,9 @@ class MainWindow(QMainWindow):
         tb.addAction("🔍 Найти принтер", self.rescan)
         tb.addAction("✎ Указать IP", self.ask_ip)
         tb.addAction("🌐 В браузере", self.open_in_browser)
+        tb.addSeparator()
+        tb.addAction("⬆ Обновления", lambda: self.check_updates(manual=True))
+        tb.addAction("ⓘ О программе", self.show_about)
 
         self.status_label = QLabel()
         self.statusBar().addPermanentWidget(self.status_label)
@@ -88,6 +93,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Открыть", self.show_window)
         menu.addAction("Найти принтер", self.rescan)
         menu.addAction("Открыть в браузере", self.open_in_browser)
+        menu.addAction("Проверить обновления", lambda: self.check_updates(manual=True))
+        menu.addAction("О программе", self.show_about)
         menu.addSeparator()
         quit_action = QAction("Выход", menu)
         quit_action.triggered.connect(self.quit)
@@ -106,6 +113,15 @@ class MainWindow(QMainWindow):
         self._retry = QTimer(self)
         self._retry.setSingleShot(True)
         self._retry.timeout.connect(self.rescan)
+
+        self._update_check: updater.UpdateCheckThread | None = None
+        self._download: updater.DownloadThread | None = None
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(UPDATE_CHECK_INTERVAL_MS)
+        self._update_timer.timeout.connect(self.check_updates)
+        if config.auto_update and updater.is_frozen():
+            QTimer.singleShot(5000, self.check_updates)
+            self._update_timer.start()
 
         self.rescan()
 
@@ -165,6 +181,62 @@ class MainWindow(QMainWindow):
         self.monitor.stop()
         self._on_found(printer)
 
+    # ---------- обновления ----------
+    def check_updates(self, manual: bool = False):
+        if self._update_check is not None or self._download is not None:
+            return
+        self._update_check = updater.UpdateCheckThread(self)
+        self._update_check.available.connect(self._on_update_available)
+        if manual:
+            self._update_check.up_to_date.connect(
+                lambda: QMessageBox.information(self, APP_NAME, f"У вас последняя версия ({__version__})."))
+            self._update_check.failed.connect(
+                lambda err: QMessageBox.warning(self, APP_NAME, f"Не удалось проверить обновления:\n{err}"))
+        self._update_check.finished.connect(self._on_update_check_finished)
+        self._update_check.start()
+
+    def _on_update_check_finished(self):
+        self._update_check.deleteLater()
+        self._update_check = None
+
+    def _on_update_available(self, release: updater.Release):
+        self.notify("Доступно обновление", f"Версия {release.version} (у вас {__version__})")
+        self.show_window()
+        notes = release.notes.strip()[:1500]
+        answer = QMessageBox.question(
+            self, "Доступно обновление",
+            f"Вышла версия {release.version} (у вас {__version__}).\n\n{notes}\n\n"
+            "Скачать и установить сейчас? Приложение перезапустится.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not updater.is_frozen():
+            QDesktopServices.openUrl(QUrl(release.page_url))
+            return
+        dlg = QProgressDialog("Загрузка обновления…", "", 0, 100, self)
+        dlg.setWindowTitle(APP_NAME)
+        dlg.setCancelButton(None)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.show()
+        self._download = updater.DownloadThread(release, self)
+        self._download.progress.connect(dlg.setValue)
+        self._download.done.connect(lambda path: (dlg.close(), updater.run_installer(path), self.quit()))
+        self._download.failed.connect(self._on_download_failed)
+        self._download.failed.connect(dlg.close)
+        self._download.start()
+
+    def _on_download_failed(self, err: str):
+        self._download = None
+        QMessageBox.warning(self, APP_NAME, f"Не удалось скачать обновление:\n{err}")
+
+    def show_about(self):
+        QMessageBox.about(
+            self, f"О программе {APP_NAME}",
+            f"<h3>{APP_NAME} {__version__}</h3>"
+            "<p>Десктоп-клиент Fluidd для 3D-принтеров на Klipper (Elegoo Neptune 4 и др.): "
+            "автопоиск принтера в сети и уведомления о печати.</p>"
+            f"<p>Автор: <b>{__author__}</b><br><a href='mailto:{__email__}'>{__email__}</a></p>"
+            f"<p><a href='{__url__}'>{__url__}</a></p>")
+
     # ---------- UI ----------
     def _show_wait(self, title: str, text: str):
         self.view.setHtml(WAIT_PAGE.format(title=title, text=text))
@@ -205,6 +277,7 @@ class MainWindow(QMainWindow):
     def quit(self):
         self._quitting = True
         self.monitor.stop()
+        self._update_timer.stop()
         if self._scan is not None:
             self._scan.stop_event.set()
             self._scan.wait(3000)
@@ -215,6 +288,8 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    app.setOrganizationName(__author__)
     app.setQuitOnLastWindowClosed(False)
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

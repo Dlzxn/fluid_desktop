@@ -1,0 +1,41 @@
+# Сборка установщика и публикация релиза при пуше тега вида v1.2.3.
+# Перед тегом поднимите __version__ в fluid_desktop/__init__.py — по ней приложение
+# сравнивает себя с последним релизом при автообновлении.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check version matches tag
+        shell: pwsh
+        run: |
+          $v = python -c "import fluid_desktop; print(fluid_desktop.__version__)"
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} != __version__ $v" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/FluiddDesktop-Setup-*.exe
+          generate_release_notes: true
